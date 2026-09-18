@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PJ Blanco</string>
+    <string name="load_error">Could not load %1$s\n\n%2$s</string>
+</resources>

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Orbit ring, tilted, drawn first so the planet sits in front of it. -->
+    <group
+        android:pivotX="54"
+        android:pivotY="56"
+        android:rotation="-18">
+        <path
+            android:fillColor="#00000000"
+            android:pathData="M26,58a28,8 0 1,0 56,0a-28,8 0 1,0 -56,0"
+            android:strokeColor="#FFD84D"
+            android:strokeWidth="5" />
+    </group>
+
+    <!-- Planet. -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,38a16,16 0 1,0 0.01,0z" />
+
+    <!-- Crater. -->
+    <path
+        android:fillColor="#2337FF"
+        android:fillAlpha="0.25"
+        android:pathData="M48,46a4,4 0 1,0 0.01,0z" />
+
+    <!-- Star. -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M79,33a3,3 0 1,0 0.01,0z" />
+</vector>

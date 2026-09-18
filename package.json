@@ -30,6 +30,8 @@
     "cf-typegen": "wrangler types",
     "check": "astro build && tsc && wrangler deploy --dry-run",
     "deploy": "wrangler deploy",
+    "build:app": "astro build && node scripts/bundle-app-assets.mjs",
+    "apk": "npm run build:app && cd android && ./gradlew assembleDebug",
     "dev": "astro dev",
     "preview": "astro build && wrangler dev"
   },

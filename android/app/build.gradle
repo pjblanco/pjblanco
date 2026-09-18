@@ -1,0 +1,51 @@
+plugins {
+    id 'com.android.application'
+}
+
+def siteUrl = (project.findProperty('siteUrl') ?: '').toString().trim()
+
+android {
+    namespace 'dev.pjblanco.app'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "dev.pjblanco.app"
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+
+        // Empty string => the WebView loads the offline bundle from assets.
+        buildConfigField "String", "SITE_URL", "\"${siteUrl}\""
+    }
+
+    buildTypes {
+        debug {
+            // Installable out of the box: signed with the auto-generated debug
+            // keystore and suffixed so it can live next to a release install.
+            applicationIdSuffix ".debug"
+            versionNameSuffix "-debug"
+        }
+        release {
+            // Unsigned on purpose: a Play Store release needs a real upload
+            // keystore, which should never live in the repo.
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    lint {
+        abortOnError false
+    }
+}
+
+// No third-party dependencies on purpose: the app is a WebView shell, so the
+// APK stays small and the build resolves nothing from Maven at compile time.
