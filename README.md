@@ -60,3 +60,9 @@ Check out [our documentation](https://docs.astro.build) or jump into our [Discor
 ## Credit
 
 This theme is based off of the lovely [Bear Blog](https://github.com/HermanMartinus/bearblog/).
+
+## Python remote-support prototype
+
+This repository also contains a separate Python prototype under [`python/`](python/README.md). It is a consent-based, read-only remote-support tool that requires a one-time pairing code, pinned TLS certificate, and explicit approval at the host. It does not implement stealth, persistence, security bypasses, remote shell execution, keyboard/mouse injection, or unattended access.
+
+See [`python/README.md`](python/README.md) for setup, usage, and security limitations.
