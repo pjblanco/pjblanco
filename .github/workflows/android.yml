@@ -78,7 +78,8 @@ jobs:
           REPORT="size=$(stat -c%s "$APK")B"
           REPORT="$REPORT sha256=$(sha256sum "$APK" | cut -d' ' -f1)"
           REPORT="$REPORT apksigner: $($BUILD_TOOLS/apksigner verify --verbose "$APK" 2>&1 | grep -E 'Verified using' | tr '\n' ' ')"
-          REPORT="$REPORT manifest: $($ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer manifest summary "$APK" 2>&1 | tr '\n' ' ')"
+          APKANALYZER="$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer"
+          REPORT="$REPORT manifest: id=$($APKANALYZER manifest application-id "$APK") v=$($APKANALYZER manifest version-name "$APK") minSdk=$($APKANALYZER manifest min-sdk "$APK") targetSdk=$($APKANALYZER manifest target-sdk "$APK") perms=[$($APKANALYZER manifest permissions "$APK" | tr '\n' ' ')]"
           REPORT="$REPORT bundled_site=$(unzip -l "$APK" | grep -c 'assets/www/')entries"
           echo "$REPORT"
           # Workflow commands escape % as %25; none of the tools above emit %
