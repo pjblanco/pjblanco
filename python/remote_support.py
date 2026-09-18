@@ -465,8 +465,11 @@ async def receive_frames(
                     "certificate fingerprint mismatch; refusing to connect "
                     f"(received {actual})"
                 )
-        elif fingerprint_callback is None or not await fingerprint_callback(actual):
-            raise ViewerError("host certificate was not trusted")
+        else:
+            # The friendly GUI intentionally uses only IP + password. TLS still
+            # encrypts the session, while terminal mode can additionally pin a
+            # certificate fingerprint for stronger host authentication.
+            notify(events, "status", "Encrypted TLS session established")
         await write_message(
             writer,
             {
@@ -477,7 +480,8 @@ async def receive_frames(
             },
         )
         output.mkdir(parents=True, exist_ok=True)
-        notify(events, "status", f"TLS verified: {actual}")
+        if fingerprint:
+            notify(events, "status", f"TLS verified: {actual}")
         frame_count = 0
         while True:
             if stop_event and stop_event.is_set():
@@ -650,7 +654,6 @@ class FriendlyApp:
         self.viewer_stop = threading.Event()
         self.viewer_events: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.viewer_photo: Any = None
-        self.trusted_viewer_hosts: dict[str, str] = {}
         self.viewer_image: Any = None
         try:
             from PIL import Image, ImageTk
@@ -934,8 +937,8 @@ class FriendlyApp:
             port = int(self.viewer_port_var.get())
             if not 1 <= port <= 65535:
                 raise ValueError("port must be between 1 and 65535")
-            if not self.viewer_code_var.get().strip() or not self.viewer_fingerprint_var.get().strip():
-                raise ValueError("enter the one-time code and certificate fingerprint")
+            if not self.viewer_host_var.get().strip() or not self.viewer_code_var.get().strip():
+                raise ValueError("enter the host IP address and password")
         except ValueError as exc:
             self.messagebox.showerror("Viewer settings", str(exc), parent=self.root)
             return
@@ -962,7 +965,6 @@ class FriendlyApp:
                         client_name,
                         self.viewer_events,
                         self.viewer_stop,
-                        lambda actual: self.confirm_viewer_host(host, actual),
                     )
                 )
             except (OSError, ViewerError, ProtocolError) as exc:
@@ -972,34 +974,6 @@ class FriendlyApp:
 
         self.viewer_thread = threading.Thread(target=run_viewer, name="remote-support-viewer", daemon=True)
         self.viewer_thread.start()
-
-    async def confirm_viewer_host(self, host: str, actual: str) -> bool:
-        known = self.trusted_viewer_hosts.get(host)
-        if known:
-            return fingerprints_match(known, actual)
-        loop = asyncio.get_running_loop()
-        decision = loop.create_future()
-
-        def ask() -> None:
-            allowed = self.messagebox.askyesno(
-                "Verify host",
-                "This is the first connection to this host.\n\n"
-                f"Certificate fingerprint:\n{actual}\n\n"
-                "Only continue if you recognize this host.",
-                parent=self.root,
-            )
-            if allowed:
-                self.trusted_viewer_hosts[host] = actual
-            def finish() -> None:
-                if not decision.done():
-                    decision.set_result(allowed)
-            loop.call_soon_threadsafe(finish)
-
-        try:
-            self.root.after(0, ask)
-        except self.tk.TclError:
-            return False
-        return await decision
 
     def stop_viewer(self) -> None:
         self.viewer_stop.set()

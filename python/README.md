@@ -39,12 +39,11 @@ The interface has two tabs:
    - Approve the incoming request in the consent dialog.
 2. **Join a session**
    - Enter only the host IP address and session password.
-   - On the first connection, review and accept the host certificate prompt. The GUI remembers that certificate for the current run.
    - Click **Connect**. The host must approve the request before frames are shown.
 
 The host password is generated in memory, expires after five minutes by default, and is single-use. The private key should be protected so only the host user can read it.
 
-Use a firewall or VPN to restrict the host port, which defaults to `8765`. Do not port-forward this prototype directly to the public internet.
+The simple GUI keeps the interface to IP address and password. It still uses encrypted TLS, but does not ask the viewer to enter a certificate fingerprint. For stronger host-identity verification, use the terminal viewer with `--fingerprint`. Use a firewall or VPN to restrict the host port, which defaults to `8765`; do not port-forward this prototype directly to the public internet.
 
 ## Build a Windows executable
 
