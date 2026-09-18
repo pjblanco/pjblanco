@@ -1,90 +1,65 @@
-# Consent-based remote support — friendly GUI
+# Simple Windows Remote Desktop launcher
 
-[`remote_support.py`](remote_support.py) is a single-file, security-first remote-support prototype. It provides read-only screen sharing over TLS only after the person at the host explicitly approves the session.
+[`remote_support.py`](remote_support.py) is a single-file GUI that launches Microsoft's built-in Windows Remote Desktop client, `mstsc.exe`.
 
-It intentionally does **not** provide stealth, persistence, security-control bypasses, privilege escalation, remote shell/command execution, keyboard or mouse injection, unattended access, or file transfer.
+It does not install an agent, use third-party networking libraries, change the registry, open firewall ports, or store passwords. The target computer must already have Windows Remote Desktop enabled.
 
-## Requirements
+## Run
 
-Python 3.11+, Pillow, Tkinter, and OpenSSL for certificate generation:
+On Windows, with Python installed:
 
-```bash
+```powershell
 cd python
-python -m pip install Pillow
-```
-
-On Windows, use a Python installer that includes **Tkinter**. On Linux, install the distribution's Tk package if needed, commonly `python3-tk`.
-
-On Linux, the host's desktop session must permit screenshots. Wayland desktops may require a portal or desktop-specific permission; the program reports a capture error instead of attempting to bypass it.
-
-## Start the friendly interface
-
-Run without arguments to open the desktop interface:
-
-```bash
 python remote_support.py
 ```
 
-You can also run:
+The GUI only asks for:
 
-```bash
-python remote_support.py gui
+- Computer name or IP address
+- Port, default `3389`
+- Optional Windows username
+
+Click **Connect with Remote Desktop**. Windows opens its own native credential dialog where the password is entered. The password is never placed in the command line or saved in a file by this program.
+
+You can also connect from a terminal:
+
+```powershell
+python remote_support.py --host 192.168.1.20 --port 3389 --username CONTOSO\alice
 ```
 
-The interface has two tabs:
+## Target computer setup
 
-1. **Host a session**
-   - Click **Start sharing**. A temporary TLS certificate is created automatically when needed.
-   - Share the displayed IP address and session password with the trusted viewer.
-   - Approve the incoming request in the consent dialog.
-2. **Join a session**
-   - Enter only the host IP address and session password.
-   - Click **Connect**. The host must approve the request before frames are shown.
+On the target Windows computer:
 
-The host password is generated in memory, expires after five minutes by default, and is single-use. The private key should be protected so only the host user can read it.
+1. Open **Settings → System → Remote Desktop**.
+2. Enable **Remote Desktop**.
+3. Ensure the Windows account is allowed to connect.
+4. Ensure Windows Firewall allows the selected port.
 
-The simple GUI keeps the interface to IP address and password. It still uses encrypted TLS, but does not ask the viewer to enter a certificate fingerprint. For stronger host-identity verification, use the terminal viewer with `--fingerprint`. Use a firewall or VPN to restrict the host port, which defaults to `8765`; do not port-forward this prototype directly to the public internet.
+The **Open RDP settings** button opens the local Windows Remote Desktop settings page. Changing the RDP listening port requires administrator access and a matching firewall rule; this launcher only selects the destination port.
 
-## Build a Windows executable
+Do not expose RDP directly to the public internet. Prefer a private network or VPN, and use strong Windows passwords with Network Level Authentication enabled.
 
-Install PyInstaller:
+## Build a standalone `.exe`
+
+Tkinter is included with the standard Windows Python installer. Build with PyInstaller:
 
 ```powershell
 cd python
-py -m pip install Pillow pyinstaller
-```
-
-Build a GUI executable:
-
-```powershell
+py -m pip install pyinstaller
 python -m PyInstaller `
   --clean `
   --noconfirm `
   --onefile `
   --windowed `
-  --name SecureRemoteSupport `
+  --name SimpleRemoteDesktop `
   remote_support.py
 ```
 
 The executable is created at:
 
 ```text
-dist\SecureRemoteSupport.exe
+dist\SimpleRemoteDesktop.exe
 ```
 
-Double-clicking it opens the friendly interface. Build on Windows to produce a Windows `.exe`; PyInstaller does not cross-compile between operating systems.
-
-The automatic certificate setup uses OpenSSL. If OpenSSL is not installed, create `host-cert.pem` and `host-key.pem` separately before starting the host.
-
-## Optional terminal mode
-
-The same file retains terminal commands for automation and headless viewers:
-
-```bash
-python remote_support.py cert --cert host-cert.pem --key host-key.pem
-python remote_support.py host --cert host-cert.pem --key host-key.pem
-python remote_support.py viewer --host 192.168.1.20 --port 8765 \
-  --code 123456 --fingerprint SHA256_FINGERPRINT_FROM_HOST --headless
-```
-
-Before production use, add a reviewed identity system, a managed relay with end-to-end encryption, OS-specific consent UX, device management, and a formal security review.
+This executable uses only the Windows built-in `mstsc.exe` client. Build on Windows to produce a Windows executable.
