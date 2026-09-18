@@ -30,7 +30,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 MAX_MESSAGE_BYTES = 8 * 1024 * 1024
 STREAM_LIMIT = 16 * 1024 * 1024
@@ -231,12 +231,33 @@ class HostConfig:
 
 
 class RemoteHost:
-    def __init__(self, config: HostConfig) -> None:
+    def __init__(
+        self,
+        config: HostConfig,
+        consent_callback: Callable[[str, str], Awaitable[bool]] | None = None,
+        ready_callback: Callable[[str, str, str], None] | None = None,
+        status_callback: Callable[[str], None] | None = None,
+    ) -> None:
         self.config = config
         self.pairing = PairingCode.create(config.pairing_ttl)
         self.audit = AuditLog(config.audit_path)
         self.session_lock = asyncio.Lock()
         self.server: asyncio.AbstractServer | None = None
+        self.consent_callback = consent_callback
+        self.ready_callback = ready_callback
+        self.status_callback = status_callback
+        self.active_task: asyncio.Task[Any] | None = None
+
+    def status(self, message: str) -> None:
+        if self.status_callback:
+            self.status_callback(message)
+
+    async def stop(self) -> None:
+        if self.server is not None:
+            self.server.close()
+            await self.server.wait_closed()
+        if self.active_task and self.active_task is not asyncio.current_task():
+            self.active_task.cancel()
 
     def tls_context(self) -> ssl.SSLContext:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -261,9 +282,14 @@ class RemoteHost:
         print(f"One-time pairing code: {self.pairing.value}")
         print(f"Code expires in {self.config.pairing_ttl} seconds")
         print("Share the fingerprint and code through a trusted channel.\n")
+        self.status("Host is ready and waiting for a viewer")
+        if self.ready_callback:
+            self.ready_callback(addresses, fingerprint, self.pairing.value)
         self.audit.event("host_started", addresses=addresses)
         async with self.server:
             await self.server.serve_forever()
+        self.audit.event("host_stopped")
+        self.status("Host stopped")
 
     async def handle_client(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -289,7 +315,11 @@ class RemoteHost:
                 self.audit.event("rejected_client", peer=peer_label, reason="busy")
                 return
             async with self.session_lock:
-                await self.run_approved_session(reader, writer, peer_label, client_name)
+                self.active_task = asyncio.current_task()
+                try:
+                    await self.run_approved_session(reader, writer, peer_label, client_name)
+                finally:
+                    self.active_task = None
         except (ConnectionError, asyncio.IncompleteReadError, ProtocolError, asyncio.TimeoutError) as exc:
             self.audit.event("client_error", peer=peer_label, error=str(exc))
         finally:
@@ -313,11 +343,15 @@ class RemoteHost:
                 "message": "A viewer requests a read-only screen session.",
             },
         )
-        answer = await asyncio.to_thread(
-            input,
-            f"\n[CONSENT REQUIRED] Allow read-only screen sharing to {client_name} ({peer})? [y/N] ",
-        )
-        if answer.strip().lower() not in {"y", "yes"}:
+        if self.consent_callback:
+            approved = await self.consent_callback(client_name, peer)
+        else:
+            answer = await asyncio.to_thread(
+                input,
+                f"\n[CONSENT REQUIRED] Allow read-only screen sharing to {client_name} ({peer})? [y/N] ",
+            )
+            approved = answer.strip().lower() in {"y", "yes"}
+        if not approved:
             await write_message(writer, {"type": "denied", "message": "host declined the session"})
             self.audit.event("session_denied", peer=peer, client_name=client_name)
             return
@@ -328,6 +362,7 @@ class RemoteHost:
             f"\n[REMOTE SESSION ACTIVE] Read-only screen sharing to {client_name}. "
             "Press Ctrl-C to stop the host."
         )
+        self.status(f"Remote session active with {client_name}")
         control_task: asyncio.Task[dict[str, Any]] = asyncio.create_task(read_message(reader))
         frame_count = 0
         try:
@@ -361,6 +396,7 @@ class RemoteHost:
             with contextlib.suppress(asyncio.CancelledError):
                 await control_task
             self.audit.event("session_ended", peer=peer, frames=frame_count)
+            self.status("Session ended; restart the host to create a new pairing code")
             print("[REMOTE SESSION ENDED]\n")
 
 
@@ -550,6 +586,411 @@ def run_gui(
 
 
 # ---------------------------------------------------------------------------
+# Friendly Tkinter GUI
+# ---------------------------------------------------------------------------
+
+class FriendlyApp:
+    """Small Tkinter launcher for hosts and viewers.
+
+    Networking runs in worker threads, while all dialogs and widgets stay on
+    Tk's main thread. The host consent dialog is therefore visible even when
+    the program is packaged with PyInstaller's ``--windowed`` option.
+    """
+
+    def __init__(self) -> None:
+        try:
+            import tkinter as tk
+            from tkinter import filedialog, messagebox, ttk
+        except ImportError as exc:
+            raise SystemExit("This GUI requires a Python installation with Tkinter") from exc
+
+        self.tk = tk
+        self.filedialog = filedialog
+        self.messagebox = messagebox
+        self.ttk = ttk
+        self.root = tk.Tk()
+        self.root.title("Secure Remote Support")
+        self.root.geometry("900x700")
+        self.root.minsize(760, 600)
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
+
+        self.host_loop: asyncio.AbstractEventLoop | None = None
+        self.host_runner: RemoteHost | None = None
+        self.host_thread: threading.Thread | None = None
+        self.viewer_thread: threading.Thread | None = None
+        self.viewer_stop = threading.Event()
+        self.viewer_events: queue.Queue[tuple[str, Any]] = queue.Queue()
+        self.viewer_photo: Any = None
+        self.viewer_image: Any = None
+        try:
+            from PIL import Image, ImageTk
+            self.image_module = Image
+            self.image_tk_module = ImageTk
+        except ImportError:
+            self.image_module = None
+            self.image_tk_module = None
+
+        style = ttk.Style(self.root)
+        with contextlib.suppress(Exception):
+            style.theme_use("vista")
+        style.configure("Title.TLabel", font=("Segoe UI", 18, "bold"))
+        style.configure("Subtitle.TLabel", foreground="#5b6470")
+        style.configure("Card.TLabelframe", padding=12)
+
+        self.build_widgets()
+        self.root.after(100, self.poll_viewer_events)
+
+    def build_widgets(self) -> None:
+        tk, ttk = self.tk, self.ttk
+        outer = ttk.Frame(self.root, padding=20)
+        outer.pack(fill="both", expand=True)
+        ttk.Label(outer, text="Secure Remote Support", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(
+            outer,
+            text="Share your screen only after you approve the session. No remote control or shell access is included.",
+            style="Subtitle.TLabel",
+            wraplength=820,
+        ).pack(anchor="w", pady=(2, 16))
+
+        notebook = ttk.Notebook(outer)
+        notebook.pack(fill="both", expand=True)
+        self.host_tab = ttk.Frame(notebook, padding=16)
+        self.viewer_tab = ttk.Frame(notebook, padding=16)
+        notebook.add(self.host_tab, text="Host a session")
+        notebook.add(self.viewer_tab, text="Join a session")
+        self.build_host_tab()
+        self.build_viewer_tab()
+
+    def entry_row(
+        self,
+        parent: Any,
+        row: int,
+        label: str,
+        variable: Any,
+        browse: bool = False,
+        directory: bool = False,
+    ) -> None:
+        ttk = self.ttk
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 10), pady=6)
+        ttk.Entry(parent, textvariable=variable).grid(row=row, column=1, sticky="ew", pady=6)
+        if browse:
+            ttk.Button(
+                parent,
+                text="Browse…",
+                command=lambda: self.choose_path(variable, directory),
+            ).grid(row=row, column=2, padx=(8, 0), pady=6)
+
+    def choose_path(self, variable: Any, directory: bool = False) -> None:
+        if directory:
+            selected = self.filedialog.askdirectory()
+        else:
+            selected = self.filedialog.askopenfilename()
+        if selected:
+            variable.set(selected)
+
+    def build_host_tab(self) -> None:
+        ttk = self.ttk
+        tab = self.host_tab
+        tab.columnconfigure(1, weight=1)
+        ttk.Label(
+            tab,
+            text="Start a temporary host. The pairing code is generated in memory and expires automatically.",
+            wraplength=700,
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 14))
+
+        self.host_cert_var = self.tk.StringVar(value="host-cert.pem")
+        self.host_key_var = self.tk.StringVar(value="host-key.pem")
+        self.host_bind_var = self.tk.StringVar(value="0.0.0.0")
+        self.host_port_var = self.tk.StringVar(value="8765")
+        self.host_ttl_var = self.tk.StringVar(value="300")
+        self.host_audit_var = self.tk.StringVar(value="")
+        self.host_status_var = self.tk.StringVar(value="Host is stopped")
+        self.host_code_var = self.tk.StringVar(value="—")
+        self.host_fingerprint_var = self.tk.StringVar(value="—")
+
+        self.entry_row(tab, 1, "Certificate", self.host_cert_var, browse=True)
+        self.entry_row(tab, 2, "Private key", self.host_key_var, browse=True)
+        self.entry_row(tab, 3, "Listen address", self.host_bind_var)
+        self.entry_row(tab, 4, "Port", self.host_port_var)
+        self.entry_row(tab, 5, "Code lifetime (seconds)", self.host_ttl_var)
+        self.entry_row(tab, 6, "Audit log (optional)", self.host_audit_var, browse=True)
+
+        button_row = ttk.Frame(tab)
+        button_row.grid(row=7, column=0, columnspan=3, sticky="w", pady=(10, 14))
+        ttk.Button(button_row, text="Generate certificate", command=self.generate_host_certificate).pack(side="left")
+        self.host_start_button = ttk.Button(button_row, text="Start host", command=self.start_host)
+        self.host_start_button.pack(side="left", padx=(8, 0))
+        self.host_stop_button = ttk.Button(button_row, text="Stop host", command=self.stop_host, state="disabled")
+        self.host_stop_button.pack(side="left", padx=(8, 0))
+
+        info = ttk.LabelFrame(tab, text="Share these details with the trusted viewer", style="Card.TLabelframe")
+        info.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(0, 12))
+        info.columnconfigure(1, weight=1)
+        ttk.Label(info, text="One-time code").grid(row=0, column=0, sticky="w", padx=(0, 10), pady=6)
+        ttk.Entry(info, textvariable=self.host_code_var, state="readonly").grid(row=0, column=1, sticky="ew", pady=6)
+        ttk.Button(info, text="Copy", command=lambda: self.copy_value(self.host_code_var.get())).grid(row=0, column=2, padx=(8, 0), pady=6)
+        ttk.Label(info, text="Certificate fingerprint").grid(row=1, column=0, sticky="w", padx=(0, 10), pady=6)
+        ttk.Entry(info, textvariable=self.host_fingerprint_var, state="readonly").grid(row=1, column=1, sticky="ew", pady=6)
+        ttk.Button(info, text="Copy", command=lambda: self.copy_value(self.host_fingerprint_var.get())).grid(row=1, column=2, padx=(8, 0), pady=6)
+
+        ttk.Label(tab, textvariable=self.host_status_var, wraplength=760).grid(
+            row=9, column=0, columnspan=3, sticky="w"
+        )
+
+    def build_viewer_tab(self) -> None:
+        ttk = self.ttk
+        tab = self.viewer_tab
+        tab.columnconfigure(1, weight=1)
+        tab.rowconfigure(8, weight=1)
+        ttk.Label(
+            tab,
+            text="Enter the host address, one-time code, and certificate fingerprint. The host must approve your request.",
+            wraplength=700,
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 14))
+
+        self.viewer_host_var = self.tk.StringVar(value="127.0.0.1")
+        self.viewer_port_var = self.tk.StringVar(value="8765")
+        self.viewer_code_var = self.tk.StringVar()
+        self.viewer_fingerprint_var = self.tk.StringVar()
+        self.viewer_name_var = self.tk.StringVar(value="support-viewer")
+        self.viewer_output_var = self.tk.StringVar(value="session-output")
+        self.viewer_status_var = self.tk.StringVar(value="Not connected")
+
+        self.entry_row(tab, 1, "Host address", self.viewer_host_var)
+        self.entry_row(tab, 2, "Port", self.viewer_port_var)
+        self.entry_row(tab, 3, "One-time code", self.viewer_code_var)
+        self.entry_row(tab, 4, "Certificate fingerprint", self.viewer_fingerprint_var)
+        self.entry_row(tab, 5, "Viewer name", self.viewer_name_var)
+        self.entry_row(tab, 6, "Output folder", self.viewer_output_var, browse=True, directory=True)
+
+        button_row = ttk.Frame(tab)
+        button_row.grid(row=7, column=0, columnspan=3, sticky="nw", pady=(10, 10))
+        self.viewer_connect_button = ttk.Button(button_row, text="Connect", command=self.start_viewer)
+        self.viewer_connect_button.pack(side="left")
+        self.viewer_stop_button = ttk.Button(button_row, text="Disconnect", command=self.stop_viewer, state="disabled")
+        self.viewer_stop_button.pack(side="left", padx=(8, 0))
+
+        self.viewer_image_label = self.tk.Label(
+            tab,
+            text="The remote screen will appear here",
+            bg="#20242a",
+            fg="white",
+            anchor="center",
+        )
+        self.viewer_image_label.grid(row=8, column=0, columnspan=3, sticky="nsew", pady=(4, 10))
+        ttk.Label(tab, textvariable=self.viewer_status_var, wraplength=760).grid(
+            row=9, column=0, columnspan=3, sticky="w"
+        )
+
+    def copy_value(self, value: str) -> None:
+        if value and value != "—":
+            self.root.clipboard_clear()
+            self.root.clipboard_append(value)
+            self.host_status_var.set("Copied to clipboard")
+
+    def generate_host_certificate(self) -> None:
+        try:
+            generate_certificate(self.host_cert_var.get(), self.host_key_var.get())
+            fingerprint = certificate_fingerprint(self.host_cert_var.get())
+            self.host_fingerprint_var.set(fingerprint)
+            self.host_status_var.set("Certificate created. Protect the private key and start the host.")
+        except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as exc:
+            self.messagebox.showerror("Certificate error", str(exc), parent=self.root)
+
+    def start_host(self) -> None:
+        if self.host_thread and self.host_thread.is_alive():
+            return
+        try:
+            port = int(self.host_port_var.get())
+            ttl = int(self.host_ttl_var.get())
+            if not 1 <= port <= 65535:
+                raise ValueError("port must be between 1 and 65535")
+            if ttl <= 0:
+                raise ValueError("code lifetime must be positive")
+            if not Path(self.host_cert_var.get()).is_file() or not Path(self.host_key_var.get()).is_file():
+                raise ValueError("create or select the certificate and private key first")
+        except ValueError as exc:
+            self.messagebox.showerror("Host settings", str(exc), parent=self.root)
+            return
+
+        config = HostConfig(
+            bind=self.host_bind_var.get().strip() or "0.0.0.0",
+            port=port,
+            cert=self.host_cert_var.get(),
+            key=self.host_key_var.get(),
+            pairing_ttl=ttl,
+            audit_path=self.host_audit_var.get().strip() or None,
+        )
+        self.host_code_var.set("Generating…")
+        self.host_fingerprint_var.set("Generating…")
+        self.host_start_button.configure(state="disabled")
+        self.host_stop_button.configure(state="normal")
+        self.host_status_var.set("Starting host…")
+        loop = asyncio.new_event_loop()
+        self.host_loop = loop
+
+        def run_host() -> None:
+            asyncio.set_event_loop(loop)
+            runner = RemoteHost(
+                config,
+                consent_callback=self.request_consent,
+                ready_callback=self.host_ready,
+                status_callback=self.host_status,
+            )
+            self.host_runner = runner
+            try:
+                loop.run_until_complete(runner.run())
+            except (OSError, ssl.SSLError, ValueError) as exc:
+                self.post_to_ui(lambda: self.host_status_var.set(f"Host error: {exc}"))
+            finally:
+                loop.close()
+                self.post_to_ui(self.host_thread_finished)
+
+        self.host_thread = threading.Thread(target=run_host, name="remote-support-host", daemon=True)
+        self.host_thread.start()
+
+    def stop_host(self) -> None:
+        if self.host_runner and self.host_loop and self.host_loop.is_running():
+            asyncio.run_coroutine_threadsafe(self.host_runner.stop(), self.host_loop)
+        self.host_status_var.set("Stopping host…")
+
+    async def request_consent(self, client_name: str, peer: str) -> bool:
+        loop = asyncio.get_running_loop()
+        decision = loop.create_future()
+
+        def ask() -> None:
+            try:
+                allowed = self.messagebox.askyesno(
+                    "Remote session request",
+                    f"{client_name} ({peer}) is requesting read-only screen sharing.\n\nAllow this session?",
+                    parent=self.root,
+                )
+            except self.tk.TclError:
+                allowed = False
+            def finish() -> None:
+                if not decision.done():
+                    decision.set_result(allowed)
+            loop.call_soon_threadsafe(finish)
+
+        try:
+            self.root.after(0, ask)
+        except self.tk.TclError:
+            return False
+        return await decision
+
+    def host_ready(self, addresses: str, fingerprint: str, code: str) -> None:
+        self.post_to_ui(lambda: self.host_code_var.set(code))
+        self.post_to_ui(lambda: self.host_fingerprint_var.set(fingerprint))
+        self.post_to_ui(lambda: self.host_status_var.set(f"Listening on {addresses}. Waiting for viewer approval."))
+
+    def host_status(self, message: str) -> None:
+        self.post_to_ui(lambda: self.host_status_var.set(message))
+
+    def host_thread_finished(self) -> None:
+        self.host_stop_button.configure(state="disabled")
+        self.host_start_button.configure(state="normal")
+        self.host_runner = None
+        self.host_loop = None
+
+    def start_viewer(self) -> None:
+        if self.viewer_thread and self.viewer_thread.is_alive():
+            return
+        if self.image_module is None:
+            self.messagebox.showerror("Pillow required", "Install Pillow first with: python -m pip install Pillow", parent=self.root)
+            return
+        try:
+            port = int(self.viewer_port_var.get())
+            if not 1 <= port <= 65535:
+                raise ValueError("port must be between 1 and 65535")
+            if not self.viewer_code_var.get().strip() or not self.viewer_fingerprint_var.get().strip():
+                raise ValueError("enter the one-time code and certificate fingerprint")
+        except ValueError as exc:
+            self.messagebox.showerror("Viewer settings", str(exc), parent=self.root)
+            return
+
+        self.viewer_stop.clear()
+        self.viewer_events = queue.Queue()
+        self.viewer_connect_button.configure(state="disabled")
+        self.viewer_stop_button.configure(state="normal")
+        self.viewer_status_var.set("Connecting…")
+        output = Path(self.viewer_output_var.get().strip() or "session-output")
+
+        def run_viewer() -> None:
+            try:
+                asyncio.run(
+                    receive_frames(
+                        self.viewer_host_var.get().strip(),
+                        port,
+                        self.viewer_code_var.get(),
+                        self.viewer_fingerprint_var.get(),
+                        output,
+                        self.viewer_name_var.get(),
+                        self.viewer_events,
+                        self.viewer_stop,
+                    )
+                )
+            except (OSError, ViewerError, ProtocolError) as exc:
+                self.viewer_events.put(("error", str(exc)))
+            finally:
+                self.viewer_events.put(("done", None))
+
+        self.viewer_thread = threading.Thread(target=run_viewer, name="remote-support-viewer", daemon=True)
+        self.viewer_thread.start()
+
+    def stop_viewer(self) -> None:
+        self.viewer_stop.set()
+        self.viewer_status_var.set("Disconnecting…")
+
+    def poll_viewer_events(self) -> None:
+        try:
+            while True:
+                kind, value = self.viewer_events.get_nowait()
+                if kind == "status":
+                    self.viewer_status_var.set(str(value))
+                elif kind == "error":
+                    self.viewer_status_var.set(f"Error: {value}")
+                elif kind == "frame":
+                    self.show_frame(value)
+                elif kind == "done":
+                    self.viewer_connect_button.configure(state="normal")
+                    self.viewer_stop_button.configure(state="disabled")
+                    if self.viewer_status_var.get() == "Disconnecting…":
+                        self.viewer_status_var.set("Disconnected")
+        except queue.Empty:
+            pass
+        if self.root.winfo_exists():
+            self.root.after(100, self.poll_viewer_events)
+
+    def show_frame(self, data: bytes) -> None:
+        if self.image_module is None or self.image_tk_module is None:
+            return
+        try:
+            image = self.image_module.open(io.BytesIO(data))
+            image.thumbnail((820, 480))
+            self.viewer_photo = self.image_tk_module.PhotoImage(image.copy())
+            self.viewer_image_label.configure(image=self.viewer_photo, text="")
+        except Exception as exc:
+            self.viewer_status_var.set(f"Unable to display frame: {exc}")
+
+    def post_to_ui(self, callback: Callable[[], None]) -> None:
+        with contextlib.suppress(self.tk.TclError):
+            self.root.after(0, callback)
+
+    def close(self) -> None:
+        self.viewer_stop.set()
+        if self.host_runner and self.host_loop and self.host_loop.is_running():
+            asyncio.run_coroutine_threadsafe(self.host_runner.stop(), self.host_loop)
+        self.root.destroy()
+
+    def run(self) -> None:
+        self.root.mainloop()
+
+
+def launch_gui() -> None:
+    FriendlyApp().run()
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -558,7 +999,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="remote_support.py",
         description="Consent-based, read-only remote screen sharing over pinned TLS.",
     )
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(dest="command")
+    subparsers.add_parser("gui", help="open the friendly desktop interface")
 
     cert = subparsers.add_parser("cert", help="generate a temporary self-signed TLS certificate")
     cert.add_argument("--cert", default="host-cert.pem")
@@ -587,6 +1029,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+    if args.command in {None, "gui"}:
+        launch_gui()
+        return
     if args.command == "cert":
         try:
             generate_certificate(args.cert, args.key, args.days)

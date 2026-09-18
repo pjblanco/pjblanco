@@ -63,6 +63,6 @@ This theme is based off of the lovely [Bear Blog](https://github.com/HermanMarti
 
 ## Python remote-support prototype
 
-This repository also contains a separate single-file Python prototype at [`python/remote_support.py`](python/remote_support.py). It is a consent-based, read-only remote-support tool that requires a one-time pairing code, pinned TLS certificate, and explicit approval at the host. It does not implement stealth, persistence, security bypasses, remote shell execution, keyboard/mouse injection, or unattended access.
+This repository also contains a single-file Python prototype at [`python/remote_support.py`](python/remote_support.py) with a friendly Tkinter GUI. It is a consent-based, read-only remote-support tool that requires a one-time pairing code, pinned TLS certificate, and explicit approval at the host. It does not implement stealth, persistence, security bypasses, remote shell execution, keyboard/mouse injection, or unattended access.
 
 See [`python/README.md`](python/README.md) for setup, usage, and security limitations.
