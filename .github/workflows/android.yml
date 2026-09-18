@@ -1,0 +1,94 @@
+name: Android APK
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      - 'android/**'
+      - 'src/**'
+      - 'public/**'
+      - 'scripts/**'
+      - 'astro.config.mjs'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/android.yml'
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    name: Build app-<flavor>.apk
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install site dependencies
+        run: npm ci
+
+      - name: Build site and bundle it into the Android app
+        run: npm run build:app
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Prefer the Android SDK that ships with the ubuntu runner image and top
+      # it up with the exact packages this build needs. If the image has no SDK
+      # at all, bootstrap cmdline-tools straight from dl.google.com instead.
+      - name: Ensure Android SDK packages
+        shell: bash
+        run: |
+          set -e
+          if [ ! -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            echo "No preinstalled sdkmanager; bootstrapping cmdline-tools"
+            export ANDROID_HOME="$HOME/android-sdk"
+            echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+            mkdir -p "$ANDROID_HOME/cmdline-tools"
+            curl -fsSL -o /tmp/cmdtools.zip \
+              https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+            unzip -q /tmp/cmdtools.zip -d "$ANDROID_HOME/cmdline-tools"
+            mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+          fi
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes 2>/dev/null | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Build debug APK
+        working-directory: android
+        run: ./gradlew --no-daemon --stacktrace assembleDebug
+
+      # Proves the APK is real and sound: signature check + manifest summary +
+      # proof the offline site bundle is inside. Emitted as a check annotation
+      # so it is readable through the GitHub API.
+      - name: Verify APK and emit report
+        shell: bash
+        run: |
+          set -e
+          APK=android/app/build/outputs/apk/debug/app-debug.apk
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/34.0.0"
+          REPORT="size=$(stat -c%s "$APK")B"
+          REPORT="$REPORT sha256=$(sha256sum "$APK" | cut -d' ' -f1)"
+          REPORT="$REPORT apksigner: $($BUILD_TOOLS/apksigner verify --verbose "$APK" 2>&1 | grep -E 'Verified using' | tr '\n' ' ')"
+          APKANALYZER="$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer"
+          REPORT="$REPORT manifest: id=$($APKANALYZER manifest application-id "$APK") v=$($APKANALYZER manifest version-name "$APK") minSdk=$($APKANALYZER manifest min-sdk "$APK") targetSdk=$($APKANALYZER manifest target-sdk "$APK") perms=[$($APKANALYZER manifest permissions "$APK" | tr '\n' ' ')]"
+          REPORT="$REPORT bundled_site=$(unzip -l "$APK" | grep -c 'assets/www/')entries"
+          echo "$REPORT"
+          # Workflow commands escape % as %25; none of the tools above emit %
+          # but be safe anyway.
+          echo "::notice title=APK verification report::${REPORT//%/%25}"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pjblanco-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

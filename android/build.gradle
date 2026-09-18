@@ -1,0 +1,9 @@
+// Top-level build file. The Android Gradle Plugin is declared here (but not
+// applied) so every module uses the same version.
+plugins {
+    id 'com.android.application' version '8.5.2' apply false
+}
+
+tasks.register('clean', Delete) {
+    delete rootProject.layout.buildDirectory
+}

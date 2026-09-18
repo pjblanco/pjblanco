@@ -20,6 +20,21 @@ const { title, description, image = '/blog-placeholder-1.jpg' } = Astro.props;
 <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
 <meta name="generator" content={Astro.generator} />
 
+<!-- Installable app (PWA) -->
+<link rel="manifest" href="/manifest.webmanifest" />
+<meta name="theme-color" content="#2337ff" />
+<meta name="mobile-web-app-capable" content="yes" />
+<link rel="apple-touch-icon" href="/icons/icon-192.png" />
+<script>
+	// Only register the service worker on a real (https) origin so the offline
+	// copy bundled inside the Android app never tries to.
+	if (location.protocol === 'https:') {
+		window.addEventListener('load', () => {
+			navigator.serviceWorker?.register('/sw.js');
+		});
+	}
+</script>
+
 <!-- Font preloads -->
 <link rel="preload" href="/fonts/atkinson-regular.woff" as="font" type="font/woff" crossorigin />
 <link rel="preload" href="/fonts/atkinson-bold.woff" as="font" type="font/woff" crossorigin />

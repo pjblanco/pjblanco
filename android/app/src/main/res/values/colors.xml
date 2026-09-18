@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Matches the accent colour defined in src/styles/global.css -->
+    <color name="accent">#2337FF</color>
+    <color name="surface">#FFFFFF</color>
+    <color name="ic_launcher_background">#2337FF</color>
+</resources>
