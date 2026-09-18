@@ -63,6 +63,6 @@ This theme is based off of the lovely [Bear Blog](https://github.com/HermanMarti
 
 ## Python remote-support prototype
 
-This repository also contains a single-file Windows Remote Desktop launcher at [`python/remote_support.py`](python/remote_support.py). It uses the built-in `mstsc.exe` client, asks only for a computer address, port, and optional username, and leaves password entry to the native Windows credential dialog.
+This repository also contains a single-file Windows Remote Desktop launcher and host setup tool at [`python/remote_support.py`](python/remote_support.py). It uses built-in `mstsc.exe` and `TermService`, asks only for a computer address, port, and optional username, and leaves password entry to the native Windows credential dialog. Its host button enables native RDP only after explicit Administrator approval.
 
 See [`python/README.md`](python/README.md) for setup, usage, and security limitations.

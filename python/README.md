@@ -1,8 +1,6 @@
-# Simple Windows Remote Desktop launcher
+# Simple Windows Remote Desktop launcher and host setup
 
-[`remote_support.py`](remote_support.py) is a single-file GUI that launches Microsoft's built-in Windows Remote Desktop client, `mstsc.exe`.
-
-It does not install an agent, use third-party networking libraries, change the registry, open firewall ports, or store passwords. The target computer must already have Windows Remote Desktop enabled.
+[`remote_support.py`](remote_support.py) is a single-file GUI around Microsoft's built-in Windows Remote Desktop client (`mstsc.exe`) and server service (`TermService`). It does not install a third-party remote-access agent and never stores passwords.
 
 ## Run
 
@@ -13,32 +11,40 @@ cd python
 python remote_support.py
 ```
 
-The GUI only asks for:
+The GUI has two simple tasks:
+
+### Connect to another computer
+
+Enter:
 
 - Computer name or IP address
 - Port, default `3389`
 - Optional Windows username
 
-Click **Connect with Remote Desktop**. Windows opens its own native credential dialog where the password is entered. The password is never placed in the command line or saved in a file by this program.
+Click **Connect with Remote Desktop**. Windows opens its native credential dialog where the password is entered. The password is never placed in this program's command line or saved in a file.
 
-You can also connect from a terminal:
+### Enable this computer as an RDP host
+
+Click **Enable Remote Desktop (Admin)**. After UAC/Administrator approval, the program:
+
+- Enables native Windows Remote Desktop;
+- Requires Network Level Authentication;
+- Enables the built-in Remote Desktop firewall group;
+- Starts the Windows Remote Desktop service when possible.
+
+This does not bypass Windows security and does not create a new account. Connect using an existing permitted Windows account and its normal password. Windows Home editions generally do not include the RDP host service; Pro, Enterprise, and Education editions are supported by Microsoft.
+
+The host uses the standard RDP port `3389`. The connection screen lets you choose a different destination port when the target has already been configured to listen on that port. Changing the native RDP listening port requires administrator access and a matching firewall rule; the **Open RDP settings** button opens Windows settings for the remaining configuration.
+
+Do not expose RDP directly to the public internet. Prefer a private network or VPN, use strong Windows passwords, and keep Network Level Authentication enabled.
+
+## Terminal mode
+
+You can launch the native client directly:
 
 ```powershell
 python remote_support.py --host 192.168.1.20 --port 3389 --username CONTOSO\alice
 ```
-
-## Target computer setup
-
-On the target Windows computer:
-
-1. Open **Settings → System → Remote Desktop**.
-2. Enable **Remote Desktop**.
-3. Ensure the Windows account is allowed to connect.
-4. Ensure Windows Firewall allows the selected port.
-
-The **Open RDP settings** button opens the local Windows Remote Desktop settings page. Changing the RDP listening port requires administrator access and a matching firewall rule; this launcher only selects the destination port.
-
-Do not expose RDP directly to the public internet. Prefer a private network or VPN, and use strong Windows passwords with Network Level Authentication enabled.
 
 ## Build a standalone `.exe`
 
@@ -62,4 +68,4 @@ The executable is created at:
 dist\SimpleRemoteDesktop.exe
 ```
 
-This executable uses only the Windows built-in `mstsc.exe` client. Build on Windows to produce a Windows executable.
+This executable uses only Windows' built-in RDP client and server service at runtime. Build on Windows to produce a Windows executable.

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Simple Windows Remote Desktop launcher.
 
-This is a small GUI around Microsoft's built-in mstsc.exe client. It does not
-install a remote-access agent, change the registry, open firewall ports, or
-store passwords. Windows Remote Desktop must already be enabled on the target
-computer by an administrator.
+This is a small GUI around Microsoft's built-in mstsc.exe client and
+TermService. It does not install a third-party remote-access agent or store
+passwords. The optional host button makes the explicit, administrator-approved
+changes needed to enable native Windows Remote Desktop and its firewall rule.
 
 The password is entered in Microsoft's native Windows credential dialog rather
 than being passed on this program's command line or stored in a file.
@@ -13,6 +13,7 @@ than being passed on this program's command line or stored in a file.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import os
 import shutil
 import subprocess
@@ -129,6 +130,62 @@ def open_remote_desktop_settings() -> None:
     os.startfile("ms-settings:remotedesktop")  # type: ignore[attr-defined]
 
 
+def is_windows_admin() -> bool:
+    if os.name != "nt":
+        return False
+    return bool(ctypes.windll.shell32.IsUserAnAdmin())
+
+
+def enable_windows_rdp() -> None:
+    """Enable Windows' native RDP server after an explicit admin action."""
+    if os.name != "nt":
+        raise RuntimeError("Windows Remote Desktop is only available on Windows")
+    if not is_windows_admin():
+        raise PermissionError("Run this program as Administrator to enable Remote Desktop")
+
+    commands = [
+        [
+            "reg.exe",
+            "add",
+            r"HKLM\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server",
+            "/v",
+            "fDenyTSConnections",
+            "/t",
+            "REG_DWORD",
+            "/d",
+            "0",
+            "/f",
+        ],
+        [
+            "reg.exe",
+            "add",
+            r"HKLM\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp",
+            "/v",
+            "UserAuthentication",
+            "/t",
+            "REG_DWORD",
+            "/d",
+            "1",
+            "/f",
+        ],
+        [
+            "netsh.exe",
+            "advfirewall",
+            "firewall",
+            "set",
+            "rule",
+            "group=remote desktop",
+            "new",
+            "enable=yes",
+        ],
+    ]
+    for command in commands:
+        subprocess.run(command, check=True, capture_output=True, text=True)
+    # Starting an already-running service returns a non-zero exit code, so it
+    # is intentionally best-effort. Windows will start it on the next request.
+    subprocess.run(["sc.exe", "start", "TermService"], check=False, capture_output=True, text=True)
+
+
 class RdpGui:
     def __init__(self) -> None:
         global tk, messagebox, ttk
@@ -144,8 +201,8 @@ class RdpGui:
             ttk = ttk_module
         self.root = tk.Tk()
         self.root.title("Windows Remote Desktop")
-        self.root.geometry("620x470")
-        self.root.minsize(520, 400)
+        self.root.geometry("620x610")
+        self.root.minsize(520, 520)
         self.root.protocol("WM_DELETE_WINDOW", self.root.destroy)
 
         style = ttk.Style(self.root)
@@ -160,6 +217,7 @@ class RdpGui:
         self.port_var = tk.StringVar(value=str(DEFAULT_RDP_PORT))
         self.username_var = tk.StringVar()
         self.status_var = tk.StringVar(value="Ready")
+        self.host_status_var = tk.StringVar(value="Remote Desktop server is not configured by this program yet.")
         self.build()
 
     def build(self) -> None:
@@ -197,10 +255,23 @@ class RdpGui:
         button_row = ttk.Frame(outer)
         button_row.grid(row=3, column=0, columnspan=3, sticky="w", pady=(18, 12))
         ttk.Button(button_row, text="Connect with Remote Desktop", command=self.connect).pack(side="left")
-        ttk.Button(button_row, text="Open RDP settings", command=self.open_settings).pack(side="left", padx=(10, 0))
+
+        host_card = ttk.LabelFrame(outer, text="Host this computer", padding=14)
+        host_card.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(8, 12))
+        ttk.Label(
+            host_card,
+            text="Use the button below to enable Windows Remote Desktop on this computer. This requires Administrator approval and uses the current Windows account password.",
+            wraplength=540,
+            justify="left",
+        ).pack(anchor="w")
+        host_buttons = ttk.Frame(host_card)
+        host_buttons.pack(anchor="w", pady=(10, 6))
+        ttk.Button(host_buttons, text="Enable Remote Desktop (Admin)", command=self.enable_rdp).pack(side="left")
+        ttk.Button(host_buttons, text="Open RDP settings", command=self.open_settings).pack(side="left", padx=(10, 0))
+        ttk.Label(host_card, textvariable=self.host_status_var, wraplength=540).pack(anchor="w", pady=(4, 0))
 
         info = ttk.LabelFrame(outer, text="Important", padding=14)
-        info.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(8, 16))
+        info.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(8, 16))
         ttk.Label(
             info,
             text=(
@@ -212,7 +283,7 @@ class RdpGui:
         ).pack(anchor="w")
 
         ttk.Label(outer, textvariable=self.status_var, wraplength=560).grid(
-            row=5, column=0, columnspan=3, sticky="w", pady=(8, 0)
+            row=6, column=0, columnspan=3, sticky="w", pady=(8, 0)
         )
         host_entry.focus_set()
         self.root.bind("<Return>", lambda _event: self.connect())
@@ -231,6 +302,22 @@ class RdpGui:
             launch_rdp(host, port, self.username_var.get(), self.set_status)
         except (OSError, RuntimeError, ValueError) as exc:
             messagebox.showerror("Remote Desktop", str(exc), parent=self.root)
+
+    def enable_rdp(self) -> None:
+        try:
+            enable_windows_rdp()
+        except (OSError, PermissionError, RuntimeError, subprocess.CalledProcessError) as exc:
+            messagebox.showerror("Enable Remote Desktop", str(exc), parent=self.root)
+            return
+        self.host_status_var.set(
+            "Remote Desktop is enabled. Use this computer's IP address and a permitted Windows account to connect."
+        )
+        messagebox.showinfo(
+            "Remote Desktop enabled",
+            "Windows Remote Desktop is now enabled with Network Level Authentication.\n\n"
+            "Use the computer's IP address, port 3389, and a permitted Windows account to connect.",
+            parent=self.root,
+        )
 
     def open_settings(self) -> None:
         try:
