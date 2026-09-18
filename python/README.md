@@ -34,16 +34,15 @@ python remote_support.py gui
 The interface has two tabs:
 
 1. **Host a session**
-   - Select or generate a certificate and private key.
-   - Click **Start host**.
-   - Share the one-time code and certificate fingerprint with the trusted viewer.
+   - Click **Start sharing**. A temporary TLS certificate is created automatically when needed.
+   - Share the displayed IP address and session password with the trusted viewer.
    - Approve the incoming request in the consent dialog.
 2. **Join a session**
-   - Enter the host address, pairing code, and certificate fingerprint.
-   - Click **Connect**.
-   - The host must approve the request before frames are shown.
+   - Enter only the host IP address and session password.
+   - On the first connection, review and accept the host certificate prompt. The GUI remembers that certificate for the current run.
+   - Click **Connect**. The host must approve the request before frames are shown.
 
-The host pairing code is generated in memory, expires after five minutes by default, and is single-use. The private key should be protected so only the host user can read it.
+The host password is generated in memory, expires after five minutes by default, and is single-use. The private key should be protected so only the host user can read it.
 
 Use a firewall or VPN to restrict the host port, which defaults to `8765`. Do not port-forward this prototype directly to the public internet.
 
@@ -76,7 +75,7 @@ dist\SecureRemoteSupport.exe
 
 Double-clicking it opens the friendly interface. Build on Windows to produce a Windows `.exe`; PyInstaller does not cross-compile between operating systems.
 
-The **Generate certificate** button uses OpenSSL. If OpenSSL is not installed, create the certificate and private key separately and select them in the GUI.
+The automatic certificate setup uses OpenSSL. If OpenSSL is not installed, create `host-cert.pem` and `host-key.pem` separately before starting the host.
 
 ## Optional terminal mode
 

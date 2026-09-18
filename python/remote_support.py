@@ -23,6 +23,7 @@ import json
 import queue
 import secrets
 import shutil
+import socket
 import ssl
 import subprocess
 import sys
@@ -191,6 +192,22 @@ def generate_certificate(cert: str, key: str, days: int = 30) -> None:
         pass
 
 
+def advertised_addresses(bind: str, port: int) -> str:
+    if bind not in {"0.0.0.0", "::"}:
+        return f"{bind}:{port}"
+    addresses: set[str] = set()
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        probe.connect(("10.255.255.255", 1))
+        addresses.add(probe.getsockname()[0])
+        probe.close()
+    except OSError:
+        with contextlib.suppress(OSError):
+            addresses.add(socket.gethostbyname(socket.gethostname()))
+    addresses.discard("127.0.0.1")
+    return ", ".join(f"{address}:{port}" for address in sorted(addresses)) or f"127.0.0.1:{port}"
+
+
 def capture_jpeg(max_width: int = 1600, quality: int = 70) -> tuple[bytes | None, str | None]:
     """Capture the desktop without attempting to bypass OS screenshot policy."""
     try:
@@ -281,10 +298,15 @@ class RemoteHost:
         print(f"Certificate SHA-256: {fingerprint}")
         print(f"One-time pairing code: {self.pairing.value}")
         print(f"Code expires in {self.config.pairing_ttl} seconds")
+        print(f"Share address: {advertised_addresses(self.config.bind, self.config.port)}")
         print("Share the fingerprint and code through a trusted channel.\n")
         self.status("Host is ready and waiting for a viewer")
         if self.ready_callback:
-            self.ready_callback(addresses, fingerprint, self.pairing.value)
+            self.ready_callback(
+                advertised_addresses(self.config.bind, self.config.port),
+                fingerprint,
+                self.pairing.value,
+            )
         self.audit.event("host_started", addresses=addresses)
         async with self.server:
             await self.server.serve_forever()
@@ -424,6 +446,7 @@ async def receive_frames(
     client_name: str,
     events: queue.Queue[tuple[str, Any]] | None = None,
     stop_event: threading.Event | None = None,
+    fingerprint_callback: Callable[[str], Awaitable[bool]] | None = None,
 ) -> None:
     # The certificate is deliberately checked manually below using its pinned
     # fingerprint. Sending the pairing code happens only after that check.
@@ -436,11 +459,14 @@ async def receive_frames(
     )
     try:
         actual = peer_fingerprint(writer.get_extra_info("ssl_object"))
-        if not fingerprints_match(fingerprint, actual):
-            raise ViewerError(
-                "certificate fingerprint mismatch; refusing to connect "
-                f"(received {actual})"
-            )
+        if fingerprint:
+            if not fingerprints_match(fingerprint, actual):
+                raise ViewerError(
+                    "certificate fingerprint mismatch; refusing to connect "
+                    f"(received {actual})"
+                )
+        elif fingerprint_callback is None or not await fingerprint_callback(actual):
+            raise ViewerError("host certificate was not trusted")
         await write_message(
             writer,
             {
@@ -608,7 +634,10 @@ class FriendlyApp:
         self.filedialog = filedialog
         self.messagebox = messagebox
         self.ttk = ttk
-        self.root = tk.Tk()
+        try:
+            self.root = tk.Tk()
+        except tk.TclError as exc:
+            raise SystemExit("GUI display is unavailable; use the terminal commands instead") from exc
         self.root.title("Secure Remote Support")
         self.root.geometry("900x700")
         self.root.minsize(760, 600)
@@ -621,6 +650,7 @@ class FriendlyApp:
         self.viewer_stop = threading.Event()
         self.viewer_events: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.viewer_photo: Any = None
+        self.trusted_viewer_hosts: dict[str, str] = {}
         self.viewer_image: Any = None
         try:
             from PIL import Image, ImageTk
@@ -691,12 +721,7 @@ class FriendlyApp:
     def build_host_tab(self) -> None:
         ttk = self.ttk
         tab = self.host_tab
-        tab.columnconfigure(1, weight=1)
-        ttk.Label(
-            tab,
-            text="Start a temporary host. The pairing code is generated in memory and expires automatically.",
-            wraplength=700,
-        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 14))
+        tab.columnconfigure(0, weight=1)
 
         self.host_cert_var = self.tk.StringVar(value="host-cert.pem")
         self.host_key_var = self.tk.StringVar(value="host-key.pem")
@@ -705,48 +730,53 @@ class FriendlyApp:
         self.host_ttl_var = self.tk.StringVar(value="300")
         self.host_audit_var = self.tk.StringVar(value="")
         self.host_status_var = self.tk.StringVar(value="Host is stopped")
+        self.host_address_var = self.tk.StringVar(value="Start the host to show the address")
         self.host_code_var = self.tk.StringVar(value="—")
         self.host_fingerprint_var = self.tk.StringVar(value="—")
 
-        self.entry_row(tab, 1, "Certificate", self.host_cert_var, browse=True)
-        self.entry_row(tab, 2, "Private key", self.host_key_var, browse=True)
-        self.entry_row(tab, 3, "Listen address", self.host_bind_var)
-        self.entry_row(tab, 4, "Port", self.host_port_var)
-        self.entry_row(tab, 5, "Code lifetime (seconds)", self.host_ttl_var)
-        self.entry_row(tab, 6, "Audit log (optional)", self.host_audit_var, browse=True)
+        ttk.Label(
+            tab,
+            text="Share your screen with a trusted person. The viewer will need the address and password below.",
+            wraplength=700,
+        ).grid(row=0, column=0, sticky="w", pady=(0, 18))
+
+        info = ttk.LabelFrame(tab, text="Connection details", style="Card.TLabelframe")
+        info.grid(row=1, column=0, sticky="ew", pady=(0, 14))
+        info.columnconfigure(1, weight=1)
+        ttk.Label(info, text="IP address and port").grid(row=0, column=0, sticky="w", padx=(0, 12), pady=8)
+        ttk.Entry(info, textvariable=self.host_address_var, state="readonly").grid(row=0, column=1, sticky="ew", pady=8)
+        ttk.Button(info, text="Copy", command=lambda: self.copy_value(self.host_address_var.get())).grid(row=0, column=2, padx=(8, 0), pady=8)
+        ttk.Label(info, text="Session password").grid(row=1, column=0, sticky="w", padx=(0, 12), pady=8)
+        ttk.Entry(info, textvariable=self.host_code_var, state="readonly").grid(row=1, column=1, sticky="ew", pady=8)
+        ttk.Button(info, text="Copy", command=lambda: self.copy_value(self.host_code_var.get())).grid(row=1, column=2, padx=(8, 0), pady=8)
 
         button_row = ttk.Frame(tab)
-        button_row.grid(row=7, column=0, columnspan=3, sticky="w", pady=(10, 14))
-        ttk.Button(button_row, text="Generate certificate", command=self.generate_host_certificate).pack(side="left")
-        self.host_start_button = ttk.Button(button_row, text="Start host", command=self.start_host)
-        self.host_start_button.pack(side="left", padx=(8, 0))
-        self.host_stop_button = ttk.Button(button_row, text="Stop host", command=self.stop_host, state="disabled")
+        button_row.grid(row=2, column=0, sticky="w", pady=(4, 14))
+        self.host_start_button = ttk.Button(button_row, text="Start sharing", command=self.start_host)
+        self.host_start_button.pack(side="left")
+        self.host_stop_button = ttk.Button(button_row, text="Stop sharing", command=self.stop_host, state="disabled")
         self.host_stop_button.pack(side="left", padx=(8, 0))
 
-        info = ttk.LabelFrame(tab, text="Share these details with the trusted viewer", style="Card.TLabelframe")
-        info.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(0, 12))
-        info.columnconfigure(1, weight=1)
-        ttk.Label(info, text="One-time code").grid(row=0, column=0, sticky="w", padx=(0, 10), pady=6)
-        ttk.Entry(info, textvariable=self.host_code_var, state="readonly").grid(row=0, column=1, sticky="ew", pady=6)
-        ttk.Button(info, text="Copy", command=lambda: self.copy_value(self.host_code_var.get())).grid(row=0, column=2, padx=(8, 0), pady=6)
-        ttk.Label(info, text="Certificate fingerprint").grid(row=1, column=0, sticky="w", padx=(0, 10), pady=6)
-        ttk.Entry(info, textvariable=self.host_fingerprint_var, state="readonly").grid(row=1, column=1, sticky="ew", pady=6)
-        ttk.Button(info, text="Copy", command=lambda: self.copy_value(self.host_fingerprint_var.get())).grid(row=1, column=2, padx=(8, 0), pady=6)
-
+        ttk.Label(
+            tab,
+            text="The first start creates a temporary TLS certificate automatically. The host will show a consent dialog before sharing any screen frames.",
+            wraplength=700,
+        ).grid(row=3, column=0, sticky="w", pady=(0, 10))
         ttk.Label(tab, textvariable=self.host_status_var, wraplength=760).grid(
-            row=9, column=0, columnspan=3, sticky="w"
+            row=4, column=0, sticky="w"
         )
 
     def build_viewer_tab(self) -> None:
         ttk = self.ttk
         tab = self.viewer_tab
         tab.columnconfigure(1, weight=1)
-        tab.rowconfigure(8, weight=1)
+        tab.rowconfigure(4, weight=1)
+
         ttk.Label(
             tab,
-            text="Enter the host address, one-time code, and certificate fingerprint. The host must approve your request.",
+            text="Enter the host computer's IP address and session password. The host must approve your request.",
             wraplength=700,
-        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 14))
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 18))
 
         self.viewer_host_var = self.tk.StringVar(value="127.0.0.1")
         self.viewer_port_var = self.tk.StringVar(value="8765")
@@ -756,15 +786,14 @@ class FriendlyApp:
         self.viewer_output_var = self.tk.StringVar(value="session-output")
         self.viewer_status_var = self.tk.StringVar(value="Not connected")
 
-        self.entry_row(tab, 1, "Host address", self.viewer_host_var)
-        self.entry_row(tab, 2, "Port", self.viewer_port_var)
-        self.entry_row(tab, 3, "One-time code", self.viewer_code_var)
-        self.entry_row(tab, 4, "Certificate fingerprint", self.viewer_fingerprint_var)
-        self.entry_row(tab, 5, "Viewer name", self.viewer_name_var)
-        self.entry_row(tab, 6, "Output folder", self.viewer_output_var, browse=True, directory=True)
+        ttk.Label(tab, text="IP address").grid(row=1, column=0, sticky="w", padx=(0, 12), pady=8)
+        ttk.Entry(tab, textvariable=self.viewer_host_var).grid(row=1, column=1, sticky="ew", pady=8)
+        ttk.Label(tab, text="Password").grid(row=2, column=0, sticky="w", padx=(0, 12), pady=8)
+        password_entry = ttk.Entry(tab, textvariable=self.viewer_code_var, show="•")
+        password_entry.grid(row=2, column=1, sticky="ew", pady=8)
 
         button_row = ttk.Frame(tab)
-        button_row.grid(row=7, column=0, columnspan=3, sticky="nw", pady=(10, 10))
+        button_row.grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 12))
         self.viewer_connect_button = ttk.Button(button_row, text="Connect", command=self.start_viewer)
         self.viewer_connect_button.pack(side="left")
         self.viewer_stop_button = ttk.Button(button_row, text="Disconnect", command=self.stop_viewer, state="disabled")
@@ -777,11 +806,10 @@ class FriendlyApp:
             fg="white",
             anchor="center",
         )
-        self.viewer_image_label.grid(row=8, column=0, columnspan=3, sticky="nsew", pady=(4, 10))
+        self.viewer_image_label.grid(row=4, column=0, columnspan=2, sticky="nsew", pady=(4, 10))
         ttk.Label(tab, textvariable=self.viewer_status_var, wraplength=760).grid(
-            row=9, column=0, columnspan=3, sticky="w"
+            row=5, column=0, columnspan=2, sticky="w"
         )
-
     def copy_value(self, value: str) -> None:
         if value and value != "—":
             self.root.clipboard_clear()
@@ -807,9 +835,12 @@ class FriendlyApp:
                 raise ValueError("port must be between 1 and 65535")
             if ttl <= 0:
                 raise ValueError("code lifetime must be positive")
-            if not Path(self.host_cert_var.get()).is_file() or not Path(self.host_key_var.get()).is_file():
-                raise ValueError("create or select the certificate and private key first")
-        except ValueError as exc:
+            cert_path = Path(self.host_cert_var.get())
+            key_path = Path(self.host_key_var.get())
+            if not cert_path.is_file() or not key_path.is_file():
+                self.host_status_var.set("Creating local TLS certificate…")
+                generate_certificate(str(cert_path), str(key_path))
+        except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as exc:
             self.messagebox.showerror("Host settings", str(exc), parent=self.root)
             return
 
@@ -879,6 +910,7 @@ class FriendlyApp:
         return await decision
 
     def host_ready(self, addresses: str, fingerprint: str, code: str) -> None:
+        self.post_to_ui(lambda: self.host_address_var.set(addresses))
         self.post_to_ui(lambda: self.host_code_var.set(code))
         self.post_to_ui(lambda: self.host_fingerprint_var.set(fingerprint))
         self.post_to_ui(lambda: self.host_status_var.set(f"Listening on {addresses}. Waiting for viewer approval."))
@@ -913,20 +945,24 @@ class FriendlyApp:
         self.viewer_connect_button.configure(state="disabled")
         self.viewer_stop_button.configure(state="normal")
         self.viewer_status_var.set("Connecting…")
+        host = self.viewer_host_var.get().strip()
+        password = self.viewer_code_var.get()
+        client_name = self.viewer_name_var.get()
         output = Path(self.viewer_output_var.get().strip() or "session-output")
 
         def run_viewer() -> None:
             try:
                 asyncio.run(
                     receive_frames(
-                        self.viewer_host_var.get().strip(),
+                        host,
                         port,
-                        self.viewer_code_var.get(),
-                        self.viewer_fingerprint_var.get(),
+                        password,
+                        "",
                         output,
-                        self.viewer_name_var.get(),
+                        client_name,
                         self.viewer_events,
                         self.viewer_stop,
+                        lambda actual: self.confirm_viewer_host(host, actual),
                     )
                 )
             except (OSError, ViewerError, ProtocolError) as exc:
@@ -936,6 +972,34 @@ class FriendlyApp:
 
         self.viewer_thread = threading.Thread(target=run_viewer, name="remote-support-viewer", daemon=True)
         self.viewer_thread.start()
+
+    async def confirm_viewer_host(self, host: str, actual: str) -> bool:
+        known = self.trusted_viewer_hosts.get(host)
+        if known:
+            return fingerprints_match(known, actual)
+        loop = asyncio.get_running_loop()
+        decision = loop.create_future()
+
+        def ask() -> None:
+            allowed = self.messagebox.askyesno(
+                "Verify host",
+                "This is the first connection to this host.\n\n"
+                f"Certificate fingerprint:\n{actual}\n\n"
+                "Only continue if you recognize this host.",
+                parent=self.root,
+            )
+            if allowed:
+                self.trusted_viewer_hosts[host] = actual
+            def finish() -> None:
+                if not decision.done():
+                    decision.set_result(allowed)
+            loop.call_soon_threadsafe(finish)
+
+        try:
+            self.root.after(0, ask)
+        except self.tk.TclError:
+            return False
+        return await decision
 
     def stop_viewer(self) -> None:
         self.viewer_stop.set()
