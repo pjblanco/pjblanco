@@ -66,6 +66,25 @@ jobs:
         working-directory: android
         run: ./gradlew --no-daemon --stacktrace assembleDebug
 
+      # Proves the APK is real and sound: signature check + manifest summary +
+      # proof the offline site bundle is inside. Emitted as a check annotation
+      # so it is readable through the GitHub API.
+      - name: Verify APK and emit report
+        shell: bash
+        run: |
+          set -e
+          APK=android/app/build/outputs/apk/debug/app-debug.apk
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/34.0.0"
+          REPORT="size=$(stat -c%s "$APK")B"
+          REPORT="$REPORT sha256=$(sha256sum "$APK" | cut -d' ' -f1)"
+          REPORT="$REPORT apksigner: $($BUILD_TOOLS/apksigner verify --verbose "$APK" 2>&1 | grep -E 'Verified using' | tr '\n' ' ')"
+          REPORT="$REPORT manifest: $($ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer manifest summary "$APK" 2>&1 | tr '\n' ' ')"
+          REPORT="$REPORT bundled_site=$(unzip -l "$APK" | grep -c 'assets/www/')entries"
+          echo "$REPORT"
+          # Workflow commands escape % as %25; none of the tools above emit %
+          # but be safe anyway.
+          echo "::notice title=APK verification report::${REPORT//%/%25}"
+
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
